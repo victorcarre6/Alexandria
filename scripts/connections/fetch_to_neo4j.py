@@ -2,7 +2,7 @@ from neo4j import GraphDatabase
 import sys
 from pathlib import Path
 
-sys.path.append(str(Path(__file__).resolve().parents[2].parent)) 
+sys.path.append(str(Path(__file__).resolve().parents[1].parent)) 
 
 from scripts.metadatas.gathering.fetch_sources import fetch_pubmed, fetch_arxiv, fetch_EuropePMC
 from scripts.metadatas.gathering.fetch_sources import generate_unique_id, get_doi_from_title
