@@ -9,11 +9,18 @@ from typing import Optional, List, Set, Tuple
 import itertools
 import asyncio
 import aiohttp
+import json
+from pathlib import Path
+
+keys_path = Path(__file__).parent.parent.parent / "keys.json"
+
+with open(keys_path, "r") as f:
+    keys = json.load(f)
 
 # === Configuration ===
-NEO4J_URI = NEO4J_URI
-NEO4J_USER = NEO4J_USER
-NEO4J_PASSWORD = NEO4J_PASSWORD
+NEO4J_URI = keys['NEO4J_URI']
+NEO4J_USER = keys['NEO4J_USERNAME']
+NEO4J_PASSWORD = keys['NEO4J_PASSWORD']
 
 PATIENT_ZERO = "10.1002/cssc.201900519"
 MAX_CITED = 30

@@ -204,3 +204,4 @@ lib/
 datas/parses
 datas/pdfs
 RAG/
+keys.json
