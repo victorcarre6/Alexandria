@@ -200,5 +200,7 @@ cython_debug/
 
 # Spécifique à ce projet
 lab/
+lib/
 datas/parses
 datas/pdfs
+RAG/

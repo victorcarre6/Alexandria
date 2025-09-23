@@ -3,10 +3,10 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[1].parent)) 
 
-from scripts.metadatas.gathering import fetch_sources
-from scripts.metadatas.gathering.fetch_sources import insert_articles_into_sqlite
-from scripts.metadatas.parsing import downloader
-from scripts.metadatas.parsing import docling
+from scripts.metadatas import fetch_sources
+from scripts.metadatas.fetch_sources import insert_articles_into_sqlite
+from scripts.metadatas import downloader
+from scripts.metadatas import docling
 
 # -----------------------
 # Variables principales

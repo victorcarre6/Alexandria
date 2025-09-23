@@ -14,6 +14,11 @@ email = "victorcarre@icloud.com"
 
 # --- RECUPERATION DES PUBLICATIONS BRUTES ---
 
+
+"""#TODO
+Ajout d'une fonction de fetch depuis HAL
+"""
+
 def fetch_pubmed(subject, year_from, year_to, limit=None, page_size=100):
     """
     Récupère les articles PubMed par mot-clé 'subject' avec pagination.
