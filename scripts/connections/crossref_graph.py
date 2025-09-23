@@ -6,9 +6,9 @@ from typing import Optional, List, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # === Configuration ===
-NEO4J_URI = "neo4j+s://2ca821c3.databases.neo4j.io"
-NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = "ezlLiixUK9RhSHNdiiwwk7JY9WXb3uK6ph8GjdLYPl8"
+NEO4J_URI = NEO4J_URI
+NEO4J_USER = NEO4J_USER
+NEO4J_PASSWORD = NEO4J_PASSWORD
 
 PATIENT_ZERO = "10.1002/anie.202402964"
 
