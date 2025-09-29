@@ -203,5 +203,7 @@ lab/
 lib/
 datas/parses
 datas/pdfs
+datas/old
+datas/bibliography.db
 RAG/
 keys.json

@@ -3,16 +3,16 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[1].parent)) 
 
-from scripts.metadatas import fetch_sources
-from scripts.metadatas.fetch_sources import insert_articles_into_sqlite
-from scripts.metadatas import downloader
-from scripts.metadatas import docling
+from metadatas import fetch_subject
+from metadatas.fetch_subject import insert_articles_into_sqlite
+from metadatas import downloader
+from metadatas import docling
 
 # -----------------------
 # Variables principales
 # -----------------------
 max_results = 20
-subject = "photochemistry"
+subject = "4CzIPN"
 year_from = 2015
 year_to = 2026
 
@@ -24,7 +24,7 @@ divided_max_results = round(max_results/3)
 # -----------------------
 print(f"=== Étape 1 : Récupération de {max_results} publications sur le sujet '{subject}' ===")
 articles = []
-for source_func in [fetch_sources.fetch_pubmed, fetch_sources.fetch_EuropePMC, fetch_sources.fetch_arxiv]:
+for source_func in [fetch_subject.fetch_pubmed, fetch_subject.fetch_EuropePMC, fetch_subject.fetch_arxiv]:
     fetched = list(source_func(subject, year_from, year_to, limit=divided_max_results))
     print(f" - {len(fetched)} articles récupérés depuis {source_func.__name__}")
     articles.extend(fetched)
