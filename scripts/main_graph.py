@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 import json
 
-from connections.sim_graph_nomain import generate_graph
+from scripts.connections.sim_graph import generate_graph
 
 # === Connexions ===
 

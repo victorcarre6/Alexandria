@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 max_results = 15
 divided_max_results = round(max_results/3)
-subject = "photochemistry"
+field = "4CzIPN"
 year_from = 2015
 year_to = 2026
 email = "victorcarre@icloud.com"
@@ -19,9 +19,9 @@ email = "victorcarre@icloud.com"
 Ajout d'une fonction de fetch depuis HAL
 """
 
-def fetch_pubmed(subject, year_from, year_to, limit=None, page_size=100):
+def fetch_pubmed(field, year_from, year_to, limit=None, page_size=100):
     """
-    Récupère les articles PubMed par mot-clé 'subject' avec pagination.
+    Récupère les articles PubMed par mot-clé 'field' avec pagination.
     - limit : nombre total d'articles souhaité
     - page_size : nombre d'articles par requête
     """
@@ -29,16 +29,41 @@ def fetch_pubmed(subject, year_from, year_to, limit=None, page_size=100):
     db_path = "datas/bibliography.db"
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS metadatas (id INTEGER PRIMARY KEY AUTOINCREMENT, unique_id TEXT UNIQUE, subject TEXT, title TEXT, authors TEXT, doi TEXT, journal TEXT, year TEXT, volume TEXT, issue TEXT, pages TEXT, source TEXT, local_key INTEGER DEFAULT 0, pdf_link TEXT, file_name TEXT);")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS metadatas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            field TEXT,
+            paper_type TEXT,
+            title TEXT,
+            authors TEXT,
+            doi TEXT UNIQUE,
+            journal TEXT,
+            year TEXT,
+            volume TEXT,
+            issue TEXT,
+            pages TEXT,
+            source TEXT
+        );
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS paper_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doi TEXT,
+            local_key INTEGER DEFAULT 0,
+            pdf_link TEXT,
+            file_name TEXT,
+            abstract TEXT
+        );
+    """)
     conn.commit()
-    c.execute("SELECT COUNT(*) FROM metadatas WHERE subject = ? AND source = 'PubMed'", (subject,))
+    c.execute("SELECT COUNT(*) FROM metadatas WHERE field = ? AND source = 'PubMed'", (field,))
     existing_count = c.fetchone()[0]
     conn.close()
     limit = limit or divided_max_results
     limit = int(limit)
     target_count = limit + existing_count
     fetch_limit = target_count * 2
-    print(f"[PubMed] {existing_count} articles déjà présents en base pour '{subject}'. Nouvelle limite de récupération : {fetch_limit}.")
+    print(f"[PubMed] {existing_count} articles déjà présents en base pour '{field}'. Nouvelle limite de récupération : {fetch_limit}.")
     base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
     total_retrieved = 0
     start = 0
@@ -47,7 +72,7 @@ def fetch_pubmed(subject, year_from, year_to, limit=None, page_size=100):
         retmax = min(page_size, fetch_limit - total_retrieved)
         params = {
             "db": "pubmed",
-            "term": subject,
+            "term": field,
             "retmax": retmax,
             "retstart": start,
             "retmode": "json",
@@ -86,7 +111,7 @@ def fetch_pubmed(subject, year_from, year_to, limit=None, page_size=100):
             article = {
                 "title": summary.get("title"),
                 "authors": [a["name"] for a in summary.get("authors", [])],
-                "subject": subject,
+                "field": field,
                 "doi": doi,
                 "year": year,
                 "journal": None,
@@ -99,7 +124,7 @@ def fetch_pubmed(subject, year_from, year_to, limit=None, page_size=100):
             # Vérifier si déjà en base (par titre)
             conn = sqlite3.connect(db_path)
             c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM metadatas WHERE subject = ? AND source = 'PubMed' AND title = ?", (subject, article["title"]))
+            c.execute("SELECT COUNT(*) FROM metadatas WHERE field = ? AND source = 'PubMed' AND title = ?", (field, article["title"]))
             if c.fetchone()[0] == 0:
                 yield article
                 articles_yielded += 1
@@ -113,23 +138,48 @@ def fetch_pubmed(subject, year_from, year_to, limit=None, page_size=100):
         if articles_yielded >= limit:
             break
 
-def fetch_arxiv(subject, year_from, year_to, limit=divided_max_results):
+def fetch_arxiv(field, year_from, year_to, limit=divided_max_results):
     """
-    Récupère les articles ArXiv par mot-clé 'subject' et plage d'années.
+    Récupère les articles ArXiv par mot-clé 'field' et plage d'années.
     """
     db_path = "datas/bibliography.db"
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS metadatas (id INTEGER PRIMARY KEY AUTOINCREMENT, unique_id TEXT UNIQUE, subject TEXT, title TEXT, authors TEXT, doi TEXT, journal TEXT, year TEXT, volume TEXT, issue TEXT, pages TEXT, source TEXT, local_key INTEGER DEFAULT 0, pdf_link TEXT, file_name TEXT);")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS metadatas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            field TEXT,
+            paper_type TEXT,
+            title TEXT,
+            authors TEXT,
+            doi TEXT UNIQUE,
+            journal TEXT,
+            year TEXT,
+            volume TEXT,
+            issue TEXT,
+            pages TEXT,
+            source TEXT
+        );
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS paper_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doi TEXT,
+            local_key INTEGER DEFAULT 0,
+            pdf_link TEXT,
+            file_name TEXT,
+            abstract TEXT
+        );
+    """)
     conn.commit()
-    c.execute("SELECT COUNT(*) FROM metadatas WHERE subject = ? AND source = 'ArXiv'", (subject,))
+    c.execute("SELECT COUNT(*) FROM metadatas WHERE field = ? AND source = 'ArXiv'", (field,))
     existing_count = c.fetchone()[0]
     conn.close()
     limit = limit or divided_max_results
     limit = int(limit)
     target_count = limit + existing_count
     fetch_limit = target_count * 2
-    print(f"[ArXiv] {existing_count} articles déjà présents en base pour '{subject}'. Nouvelle limite de récupération : {fetch_limit}.")
+    print(f"[ArXiv] {existing_count} articles déjà présents en base pour '{field}'. Nouvelle limite de récupération : {fetch_limit}.")
     base_url = "http://export.arxiv.org/api/query"
     ns = {
         "atom": "http://www.w3.org/2005/Atom",
@@ -142,7 +192,7 @@ def fetch_arxiv(subject, year_from, year_to, limit=divided_max_results):
     articles_yielded = 0
 
     while articles_yielded < limit:
-        search_query = f"all:{subject} AND submittedDate:[{year_from}0101 TO {year_to}1231]"
+        search_query = f"all:{field} AND submittedDate:[{year_from}0101 TO {year_to}1231]"
         params = {
             "search_query": search_query,
             "start": start,
@@ -184,7 +234,7 @@ def fetch_arxiv(subject, year_from, year_to, limit=divided_max_results):
             article = {
                 "title": title,
                 "authors": authors,
-                "subject": subject,
+                "field": field,
                 "doi": doi,
                 "date": date,
                 "year": year,
@@ -198,7 +248,7 @@ def fetch_arxiv(subject, year_from, year_to, limit=divided_max_results):
             # Vérifier si déjà en base (par titre)
             conn = sqlite3.connect(db_path)
             c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM metadatas WHERE subject = ? AND source = 'ArXiv' AND title = ?", (subject, title))
+            c.execute("SELECT COUNT(*) FROM metadatas WHERE field = ? AND source = 'ArXiv' AND title = ?", (field, title))
             if c.fetchone()[0] == 0:
                 yield article
                 articles_yielded += 1
@@ -213,30 +263,55 @@ def fetch_arxiv(subject, year_from, year_to, limit=divided_max_results):
         if articles_yielded >= limit:
             break
 
-def fetch_EuropePMC(subject, year_from, year_to, limit=None, retries=3, delay=5):
+def fetch_EuropePMC(field, year_from, year_to, limit=None, retries=3, delay=5):
     """
     Récupère les articles depuis Europe PMC avec retry automatique.
     """
     db_path = "datas/bibliography.db"
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS metadatas (id INTEGER PRIMARY KEY AUTOINCREMENT, unique_id TEXT UNIQUE, subject TEXT, title TEXT, authors TEXT, doi TEXT, journal TEXT, year TEXT, volume TEXT, issue TEXT, pages TEXT, source TEXT, local_key INTEGER DEFAULT 0, pdf_link TEXT, file_name TEXT);")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS metadatas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            field TEXT,
+            paper_type TEXT,
+            title TEXT,
+            authors TEXT,
+            doi TEXT UNIQUE,
+            journal TEXT,
+            year TEXT,
+            volume TEXT,
+            issue TEXT,
+            pages TEXT,
+            source TEXT
+        );
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS paper_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doi TEXT,
+            local_key INTEGER DEFAULT 0,
+            pdf_link TEXT,
+            file_name TEXT,
+            abstract TEXT
+        );
+    """)
     conn.commit()
-    c.execute("SELECT COUNT(*) FROM metadatas WHERE subject = ? AND source = 'EuropePMC'", (subject,))
+    c.execute("SELECT COUNT(*) FROM metadatas WHERE field = ? AND source = 'EuropePMC'", (field,))
     existing_count = c.fetchone()[0]
     conn.close()
     limit = limit or divided_max_results
     limit = int(limit)
     target_count = limit + existing_count
     fetch_limit = target_count * 2
-    print(f"[EuropePMC] {existing_count} articles déjà présents en base pour '{subject}'. Nouvelle limite de récupération : {fetch_limit}.")
+    print(f"[EuropePMC] {existing_count} articles déjà présents en base pour '{field}'. Nouvelle limite de récupération : {fetch_limit}.")
     url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/search"
     page_size = min(1000, fetch_limit)
     articles_yielded = 0
     page = 1
     while articles_yielded < limit:
         params = {
-            "query": f"{subject} AND PUB_YEAR:[{year_from} TO {year_to}]",
+            "query": f"{field} AND PUB_YEAR:[{year_from} TO {year_to}]",
             "format": "json",
             "pageSize": page_size,
             "page": page
@@ -272,7 +347,7 @@ def fetch_EuropePMC(subject, year_from, year_to, limit=None, retries=3, delay=5)
             article = {
                 "title": result.get("title"),
                 "authors": result.get("authorString").split(", ") if result.get("authorString") else [],
-                "subject": subject,
+                "field": field,
                 "doi": result.get("doi"),
                 "year": str(result.get("pubYear")) if result.get("pubYear") else None,
                 "journal": result.get("journalTitle"),
@@ -285,7 +360,7 @@ def fetch_EuropePMC(subject, year_from, year_to, limit=None, retries=3, delay=5)
             # Vérifier si déjà en base (par titre)
             conn = sqlite3.connect(db_path)
             c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM metadatas WHERE subject = ? AND source = 'EuropePMC' AND title = ?", (subject, article["title"]))
+            c.execute("SELECT COUNT(*) FROM metadatas WHERE field = ? AND source = 'EuropePMC' AND title = ?", (field, article["title"]))
             if c.fetchone()[0] == 0:
                 yield article
                 articles_yielded += 1
@@ -375,46 +450,65 @@ def insert_articles_into_sqlite(articles, email, db_path="datas/bibliography.db"
     c.execute("""
         CREATE TABLE IF NOT EXISTS metadatas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            unique_id TEXT UNIQUE,
-            subject TEXT,
+            field TEXT,
+            paper_type TEXT,
             title TEXT,
             authors TEXT,
-            doi TEXT,
+            doi TEXT UNIQUE,
             journal TEXT,
             year TEXT,
             volume TEXT,
             issue TEXT,
             pages TEXT,
-            source TEXT,
+            source TEXT
+        );
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS paper_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doi TEXT,
             local_key INTEGER DEFAULT 0,
             pdf_link TEXT,
-            file_name TEXT
+            file_name TEXT,
+            abstract TEXT
         );
     """)
     conn.commit()
 
     # Insertion initiale
     for article in articles:
-        unique_id = generate_unique_id(article)
         c.execute("""
             INSERT OR IGNORE INTO metadatas
-            (unique_id, subject, title, authors, doi, journal, year, volume, issue, pages, source, pdf_link, file_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (unique_id, article['subject'], article['title'], str(article['authors']), article['doi'],
+            (field, paper_type, title, authors, doi, journal, year, volume, issue, pages, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (article['field'], None, article['title'], str(article['authors']), article['doi'],
               article['journal'], article['year'], article['volume'], article['issue'], article['pages'],
-              article['source'], article['pdf_link'], None))
+              article['source']))
+        # Insert into paper_data as well
+        c.execute("""
+            INSERT OR IGNORE INTO paper_data
+            (doi, local_key, pdf_link, file_name, abstract)
+            VALUES (?, ?, ?, ?, ?)
+        """, (article['doi'], 0, article['pdf_link'], None, None))
     conn.commit()
 
     # Après insertion, pour ArXiv, mettre local_key=1 si pdf_link non NULL
     c.execute("""
-        UPDATE metadatas
+        UPDATE paper_data
         SET local_key = 1
-        WHERE source = 'ArXiv' AND pdf_link IS NOT NULL AND local_key = 0
+        WHERE doi IN (
+            SELECT doi FROM metadatas WHERE source = 'ArXiv'
+        ) AND pdf_link IS NOT NULL AND local_key = 0
     """)
     conn.commit()
 
     # Récupération DOI non encore enrichis
-    c.execute("SELECT doi FROM metadatas WHERE doi IS NOT NULL AND local_key=0")
+    c.execute("""
+        SELECT m.doi
+        FROM metadatas m
+        JOIN paper_data p ON m.doi = p.doi
+        WHERE m.doi IS NOT NULL AND p.local_key = 0
+    """)
     new_dois = [row[0] for row in c.fetchall()]
 
     # Appel Crossref et Unpaywall en parallèle, mais Unpaywall seulement si source != "ArXiv"
@@ -425,7 +519,12 @@ def insert_articles_into_sqlite(articles, email, db_path="datas/bibliography.db"
 
     # On doit récupérer les sources pour chaque DOI pour savoir si c'est ArXiv
     # On va récupérer les articles concernés depuis la base
-    c.execute("SELECT doi, source FROM metadatas WHERE doi IS NOT NULL AND local_key=0")
+    c.execute("""
+        SELECT m.doi, m.source
+        FROM metadatas m
+        JOIN paper_data p ON m.doi = p.doi
+        WHERE m.doi IS NOT NULL AND p.local_key = 0
+    """)
     doi_source_pairs = c.fetchall()
     articles_for_enrich = [{"doi": row[0], "source": row[1]} for row in doi_source_pairs]
 
@@ -439,15 +538,25 @@ def insert_articles_into_sqlite(articles, email, db_path="datas/bibliography.db"
     for doi, crossref_data, unpaywall_data, article_source in results:
         pdf_url = unpaywall_data.get("pdf_link") if unpaywall_data and article_source != "ArXiv" else None
         c.execute("""
-            UPDATE metadatas
-            SET journal=?, volume=?, issue=?, pages=?, pdf_link=?, local_key=1
-            WHERE doi=?
-        """, (crossref_data.get("journal") if crossref_data else None,
-              crossref_data.get("volume") if crossref_data else None,
-              crossref_data.get("issue") if crossref_data else None,
-              crossref_data.get("pages") if crossref_data else None,
-              pdf_url,
-              doi))
+        UPDATE metadatas
+        SET journal=?, volume=?, issue=?, pages=?
+        WHERE doi=?
+    """, (
+        crossref_data.get("journal") if crossref_data else None,
+        crossref_data.get("volume") if crossref_data else None,
+        crossref_data.get("issue") if crossref_data else None,
+        crossref_data.get("pages") if crossref_data else None,
+        doi
+    ))
+
+    c.execute("""
+        UPDATE paper_data
+        SET pdf_link=?, local_key=1
+        WHERE doi=?
+    """, (
+        pdf_url,
+        doi
+    ))
             
     conn.commit()
     conn.close()
@@ -455,9 +564,9 @@ def insert_articles_into_sqlite(articles, email, db_path="datas/bibliography.db"
 # Nouvelle section __main__ propre, sans duplication ni appels multiples
 if __name__ == "__main__":
     sources = {
-        "PubMed": lambda: list(fetch_pubmed(subject, year_from, year_to, limit=divided_max_results)),
-        "EuropePMC": lambda: list(fetch_EuropePMC(subject, year_from, year_to, limit=divided_max_results)),
-        "ArXiv": lambda: list(fetch_arxiv(subject, year_from, year_to, limit=divided_max_results))
+        "PubMed": lambda: list(fetch_pubmed(field, year_from, year_to, limit=divided_max_results)),
+        "EuropePMC": lambda: list(fetch_EuropePMC(field, year_from, year_to, limit=divided_max_results)),
+        "ArXiv": lambda: list(fetch_arxiv(field, year_from, year_to, limit=divided_max_results))
     }
 
     results = {}

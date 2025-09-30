@@ -51,26 +51,43 @@ def get_data_in_batch(dois: List[str], batch_size: int = 200, max_workers: int =
     params = {"fields": "externalIds,citations.externalIds"}
     results: Dict[str, Dict[str, Union[str, List[Any], None]]] = {}
 
+    # Filter out invalid DOIs (None or empty string)
+    valid_dois = [d for d in dois if d and isinstance(d, str) and d.strip()]
     # Split DOI list into batches
-    batches = [dois[i:i+batch_size] for i in range(0, len(dois), batch_size)]
+    batches = [valid_dois[i:i+batch_size] for i in range(0, len(valid_dois), batch_size)]
 
     def fetch_batch(batch_dois: List[str]) -> Dict[str, Dict[str, Union[str, List[Any], None]]]:
         batch_results: Dict[str, Dict[str, Union[str, List[Any], None]]] = {}
+        # Filter out invalid DOIs for this batch
+        filtered_batch_dois = [d for d in batch_dois if d and isinstance(d, str) and d.strip()]
+        print(f"[DEBUG] Sending batch to Semantic Scholar: {filtered_batch_dois}")
         try:
-            resp = requests.post(url, params=params, json={"ids": batch_dois}, timeout=20)
+            resp = requests.post(url, params=params, json={"ids": filtered_batch_dois}, timeout=20)
             resp.raise_for_status()
             papers = resp.json()
-
+            if not isinstance(papers, list):
+                print(f"[SemanticScholar] Unexpected response format, not a list: {papers}")
+                papers = []
             for paper in papers:
-                orig_doi = paper.get("externalIds", {}).get("DOI")
-                if not orig_doi:
+                if paper is None:
+                    continue  # Ignore None entries
+                orig_doi = None
+                # Defensive: externalIds may be missing
+                external_ids = paper.get("externalIds") if isinstance(paper, dict) else None
+                if external_ids and isinstance(external_ids, dict):
+                    orig_doi = external_ids.get("DOI")
+                if not orig_doi or not isinstance(orig_doi, str) or not orig_doi.strip():
                     continue
+                # Defensive: citations field
+                citations_list = paper.get("citations")
+                if not isinstance(citations_list, list):
+                    citations_list = []
                 batch_results[orig_doi] = {
                     "doi": orig_doi,
                     "citations": [
                         cited.get("externalIds", {}).get("DOI")
-                        for cited in paper.get("citations", [])
-                        if cited.get("externalIds", {}).get("DOI")
+                        for cited in citations_list
+                        if cited and isinstance(cited, dict) and cited.get("externalIds", {}).get("DOI")
                     ],
                     "file_name": None
                 }
@@ -78,7 +95,7 @@ def get_data_in_batch(dois: List[str], batch_size: int = 200, max_workers: int =
             print(f"[SemanticScholar] Erreur (batch in): {e}")
 
         # S'assurer que tous les DOI du batch sont présents même s'ils n'ont pas été récupérés
-        for d in batch_dois:
+        for d in filtered_batch_dois:
             if d not in batch_results:
                 batch_results[d] = {"doi": d, "citations": []}
 
@@ -107,17 +124,28 @@ def get_data_from_query(input: str, limit: int = 10) -> Dict[str, Dict[str, Unio
         resp = requests.get(url, params={**query, **params}, timeout=20)
         resp.raise_for_status()
         papers = resp.json()
+        data_list = papers.get("data", [])
 
-        for paper in papers.get("data", []):
-            orig_doi = paper.get("externalIds", {}).get("DOI")
-            if not orig_doi:
+        for paper in data_list:
+            if paper is None:
                 continue
+            external_ids = paper.get("externalIds")
+            if not external_ids or not isinstance(external_ids, dict):
+                continue
+            orig_doi = external_ids.get("DOI")
+            if not orig_doi or not isinstance(orig_doi, str) or not orig_doi.strip():
+                continue
+
+            citations_list = paper.get("citations")
+            if not isinstance(citations_list, list):
+                citations_list = []
+
             results[orig_doi] = {
                 "doi": orig_doi,
                 "citations": [
                     cited.get("externalIds", {}).get("DOI")
-                    for cited in paper.get("citations", [])
-                    if cited.get("externalIds", {}).get("DOI")
+                    for cited in citations_list
+                    if cited and isinstance(cited, dict) and cited.get("externalIds", {}).get("DOI")
                 ],
                 "file_name": None
             }
@@ -336,11 +364,11 @@ def compute_similarity_in_batches(driver, batch_size: int = 1000, alpha: float =
         """, alpha=alpha, beta=beta)
 
 def build_citation_graph_from_seed(seed_doi: str, depth, pause,
-                         driver=None, batch_size=50, max_dois: Optional[int] = None):
+                         driver=None, batch_size=50, graph_max_dois: Optional[int] = None):
     """
     Explore les citations à partir d'un DOI seed, jusqu'à une profondeur donnée.
     Crée les relations CITES dans Neo4j en batch.
-    max_dois : nombre maximal de DOI à analyser (None = pas de limite)
+    graph_max_dois : nombre maximal de DOI à analyser (None = pas de limite)
     """
     
 
@@ -355,8 +383,8 @@ def build_citation_graph_from_seed(seed_doi: str, depth, pause,
         while frontier and len(batch) < batch_size:
             doi, level = frontier.popleft()
             if doi not in seen and level <= depth:
-                # Vérifier la limite max_dois
-                if max_dois is not None and total_analyzed >= max_dois:
+                # Vérifier la limite graph_max_dois
+                if graph_max_dois is not None and total_analyzed >= graph_max_dois:
                     frontier.clear()  # stop exploration
                     break
                 batch.append((doi, level))
@@ -424,38 +452,39 @@ def build_citation_graph_from_seed(seed_doi: str, depth, pause,
                 
 
 def build_citation_graph_from_query(seed: str, depth, pause,
-                         driver=None, batch_size=50,  max_dois: Optional[int] = None):
+                                   driver=None, batch_size=50, fetch_max_dois=10, graph_max_dois: Optional[int] = None):
     """
     Explore les citations à partir d'un terme de recherche.
     Crée les relations CITES dans Neo4j en batch.
-    max_dois : nombre maximal de DOI à analyser (None = pas de limite)
+    graph_max_dois : nombre maximal de DOI à analyser (None = pas de limite)
     """
-    
     total_analyzed = 0
     start_time = time.time()
     citations_dict: Dict[str, Dict[str, Optional[List[str]]]] = {}
-    
+
     seen: Set[str] = set()
 
-    # Initialisation du batch avec les DOI du premier batch, niveau 0
-    first_doi_batch = get_data_from_query(seed, limit=10)
-    initial_batch = [(doi, 0) for doi in first_doi_batch.keys()]
+    # Premier batch à partir de la requête
+    first_doi_batch = get_data_from_query(seed, limit=fetch_max_dois)
     frontier = deque()
 
-    while frontier or initial_batch:
-        if initial_batch:
-            batch = initial_batch
-            initial_batch = []
-        else:
-            batch = []
-            while frontier and len(batch) < batch_size:
-                doi, level = frontier.popleft()
-                if doi not in seen and level <= depth:
-                    # Vérifier la limite max_dois
-                    if max_dois is not None and total_analyzed >= max_dois:
-                        frontier.clear()  # stop exploration
-                        break
-                    batch.append((doi, level))
+    # Ajouter tous les DOI valides du premier batch à la frontier
+    for doi in first_doi_batch.keys():
+        if doi not in seen:
+            frontier.append((doi, 0))
+
+    print(f"[DEBUG] Initial frontier: {[doi for doi,_ in frontier]}")
+
+    while frontier:
+        batch = []
+        while frontier and len(batch) < batch_size:
+            doi, level = frontier.popleft()
+            if doi not in seen and level <= depth:
+                # Vérifier la limite graph_max_dois
+                if graph_max_dois is not None and total_analyzed >= graph_max_dois:
+                    frontier.clear()  # stop exploration
+                    break
+                batch.append((doi, level))
 
         if not batch:
             break
@@ -465,7 +494,6 @@ def build_citation_graph_from_query(seed: str, depth, pause,
 
         # Récupération des données en batch
         s_time = time.time()
-        
         batch_data = get_data_in_batch(batch_dois)
         e_time = time.time()
         print(f"[DEBUG] Batch de {len(batch_dois)} DOI récupéré en {e_time - s_time:.2f}s")
@@ -488,7 +516,7 @@ def build_citation_graph_from_query(seed: str, depth, pause,
             # Ajouter à la prochaine frontière si profondeur non atteinte
             if level < depth:
                 for ref in refs:
-                    if ref and isinstance(ref, str) and ref not in seen:
+                    if ref not in seen:
                         next_frontier.append((ref, level + 1))
 
             #print(f"[Niveau {level}] {doi} → {len(refs)} citants [{total_analyzed} analyses en {t1-t_start:.1f}s].")
@@ -519,7 +547,7 @@ def build_citation_graph_from_query(seed: str, depth, pause,
     return citations_dict
 
 
-def generate_graph(driver, db_path, seed, depth, max_dois, 
+def generate_graph(driver, db_path, seed, depth, fetch_max_dois,  graph_max_dois, 
                    pause, batch_size, max_worker, 
                    edge_mode, weight_threshold, 
                    top_n, top_n_cites, top_n_score, top_n_cocit, top_n_coupling):
@@ -536,7 +564,7 @@ def generate_graph(driver, db_path, seed, depth, max_dois,
             pause=pause,
             driver=driver,
             batch_size=batch_size,
-            max_dois=max_dois
+            graph_max_dois=graph_max_dois
         )
     else:
         print(f"[INFO-QUERY] Generating a semantic graph of {seed}")
@@ -546,7 +574,8 @@ def generate_graph(driver, db_path, seed, depth, max_dois,
             pause=pause,
             driver=driver,
             batch_size=batch_size,
-            max_dois=max_dois
+            fetch_max_dois=fetch_max_dois,
+            graph_max_dois=graph_max_dois
         )
 
     compute_similarity_in_batches(driver)
