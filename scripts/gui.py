@@ -37,10 +37,6 @@ NEO4J_USERNAME = keys["NEO4J_USERNAME"]
 NEO4J_PASSWORD = keys["NEO4J_PASSWORD"]
 EMAIL = keys["EMAIL"]
 
-
-# --- DEBUG print ---
-print(f"[DEBUG] Keys loaded: URI={NEO4J_URI}, USER={NEO4J_USERNAME}, EMAIL={EMAIL}, PASSWORD={NEO4J_PASSWORD}")
-
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
 G: nx.Graph = nx.Graph()
 
@@ -70,6 +66,8 @@ root = tk.Tk()
 
 total_analyzed = 0
 displayed_dois = []
+initial_articles = []  # liste complète chargée depuis la DB ou fetch
+displayed_articles = []  # liste affichée après filtre/tri
 selected_doi = None
 
 PATIENT_ZERO = ""
@@ -205,7 +203,6 @@ def generate_graph_selected():
     else:
         update_status("No DOI selected", error=True)
           
-
 def fetcher_selected():
     global selected_doi
     if selected_doi:
@@ -216,6 +213,39 @@ def fetcher_selected():
         fetcher_ss()
     else:
         update_status("No DOI selected", error=True)
+
+def update_displayed_articles(articles_list):
+    """
+    Remplit text_output à partir d'une liste d'articles.
+    """
+    text_output.delete("1.0", tk.END)
+    displayed_dois.clear()
+    
+    for i, article in enumerate(articles_list, start=1):
+        doi = article["doi"]
+        displayed_dois.append(doi)
+        start_index = text_output.index(tk.END)
+        text_output.insert(tk.END, f"{i}. {article['title']}\n")
+        text_output.insert(tk.END, f"   {article['authors']}\n")
+        journal_line = f"   {article['journal']} ({article['year']})"
+        if article['volume']:
+            journal_line += f", {article['volume']}"
+        if article['issue']:
+            journal_line += f", {article['issue']}"
+        if article['pages']:
+            journal_line += f", {article['pages']}."
+        text_output.insert(tk.END, journal_line + "\n")
+        text_output.insert(tk.END, f"   doi:{doi}\n")
+        if article['pdf_link']:
+            text_output.insert(tk.END, f"   Open Access available at {article['pdf_link']}\n\n")
+        if article['abstract']:
+            text_output.insert(tk.END, f"{article['abstract']}\n\n")
+        # Tag sur le DOI
+        tag_name = f"doi_{i}"
+        end_index = text_output.index(tk.END)
+        text_output.tag_add(tag_name, start_index, end_index)
+        text_output.tag_bind(tag_name, "<Button-1>", lambda e, d=doi: select_doi(d))
+        text_output.tag_bind(tag_name, right_click_event, lambda e, d=doi: select_doi(d))
 
 # === Principales ===
 
@@ -317,6 +347,7 @@ def on_sim_graph_pool():
     root.update()
 
 def fetcher_ss(limit=None, email=None, db_path=str(DB_PATH)):
+    global initial_articles, displayed_articles
     patient_zero = input.get("1.0", tk.END).strip()
     if limit is None:
         limit = FETCH_MAX_DOIS.get()
@@ -367,7 +398,11 @@ def fetcher_ss(limit=None, email=None, db_path=str(DB_PATH)):
     insert_articles_into_sqlite(articles, email, db_path)
     update_status(f"{len(articles)} publications fetched and added to the database")
     root.update()
-    
+    for idx, art in enumerate(articles):
+                art["_initial_pos"] = idx  # position relative dans la liste initiale
+    initial_articles = articles.copy()  # sauvegarde pour refinement
+    displayed_articles = articles.copy() 
+    update_displayed_articles(displayed_articles)
     text_output.delete("1.0", tk.END)
     text_output.insert(tk.END, f"[SemanticScholar] {len(articles)} articles insérés.\n\n")
 
@@ -389,7 +424,8 @@ def fetcher_ss(limit=None, email=None, db_path=str(DB_PATH)):
         if article['pdf_link']:
             text_output.insert(tk.END, f"   Open Access available at {article['pdf_link']}\n\n")
         if article['abstract']:
-            text_output.insert(tk.END, f"{article['abstract']}\n\n")
+            text_output.insert(tk.END, f"{article['abstract']}")
+        text_output.insert(tk.END, f"\n\n")
         # Tag sur le DOI
         tag_name = f"doi_{i}"
         end_index = text_output.index(tk.END)
@@ -441,8 +477,11 @@ def get_publication_by_keywords(keywords, db_path):
     return [dict(zip(keys, row)) for row in rows]
 
 def get_from_base(db_path=DB_PATH):
+    global displayed_articles, initial_articles
+    
     query = input.get("1.0", tk.END).strip()
     text_output.delete("1.0", tk.END)
+    
 
     if query.startswith("10."):  # cas DOI
         update_status(f"Retrieving publication informations from database with DOI {query}")
@@ -451,35 +490,46 @@ def get_from_base(db_path=DB_PATH):
         update_status(f"Publications DOI:{query} retrieved from the database")
         root.update()
         if result:
-            results = [result]  # on l’enveloppe dans une liste pour itérer de la même façon
+            results = [result]
+            for idx, art in enumerate(results):
+                art["_initial_pos"] = idx  # position relative dans la liste initiale
+            initial_articles = results.copy()
+            displayed_articles = results.copy() 
         else:
             results = []
     else:  # cas mots-clés
         update_status(f'Retrieving publications informations from database with keyword "{query}"')
         root.update()
         results = get_publication_by_keywords(query, db_path)
+        for idx, art in enumerate(results):
+                art["_initial_pos"] = idx  # position relative dans la liste initiale
+        initial_articles = results.copy()  # sauvegarde pour refinement
+        displayed_articles = results.copy() 
         update_status(f"{len(results)} publications retrieved from the database")
         root.update()
 
-    for i, res in enumerate(results, start=1):
-        doi = res["doi"]
-        displayed_dois.append(res["doi"])
+    update_displayed_articles(displayed_articles)
+
+    for i, article in enumerate(results, start=1):
+        doi = article["doi"]
+        displayed_dois.append(article["doi"])
         start_index = text_output.index(tk.END)
-        text_output.insert(tk.END, f"{i}. {res['title']}\n")
-        text_output.insert(tk.END, f"   {res['authors']}\n")
-        journal_line = f"   {res['journal']} ({res['year']})"
-        if res['volume']:
-            journal_line += f", {res['volume']}"
-        if res['issue']:
-            journal_line += f", {res['issue']}"
-        if res['pages']:
-            journal_line += f", {res['pages']}."
+        text_output.insert(tk.END, f"{i}. {article['title']}\n")
+        text_output.insert(tk.END, f"   {article['authors']}\n")
+        journal_line = f"   {article['journal']} ({article['year']})"
+        if article['volume']:
+            journal_line += f", {article['volume']}"
+        if article['issue']:
+            journal_line += f", {article['issue']}"
+        if article['pages']:
+            journal_line += f", {article['pages']}."
         text_output.insert(tk.END, journal_line + "\n")
-        text_output.insert(tk.END, f"   doi:{res['doi']}\n")
-        if res['pdf_link']:
-            text_output.insert(tk.END, f"   Open Access available at {res['pdf_link']}\n\n")
-        if res['abstract']:
-            text_output.insert(tk.END, f"{res['abstract']}\n\n")
+        text_output.insert(tk.END, f"   doi:{article['doi']}\n")
+        if article['pdf_link']:
+            text_output.insert(tk.END, f"   Open Access available at {article['pdf_link']}\n\n")
+        if article['abstract']:
+            text_output.insert(tk.END, f"{article['abstract']}")
+        text_output.insert(tk.END, f"\n\n")
         # Tag sur le DOI
         tag_name = f"doi_{i}"
         end_index = text_output.index(tk.END)
@@ -487,6 +537,24 @@ def get_from_base(db_path=DB_PATH):
         text_output.tag_bind(tag_name, "<Button-1>", lambda e, d=doi: select_doi(d))
         text_output.tag_bind(tag_name, right_click_event, lambda e, d=doi: select_doi(d))
         
+    
+def open_in_browser():
+    global selected_doi
+    if not selected_doi:
+        update_status("No publication selected for opening in browser.", error=True)
+        return
+
+    record = get_publication_by_doi(selected_doi, DB_PATH)
+    if record and record.get("doi"):
+        doi_url = f"https://doi.org/{record['doi']}"
+        try:
+            webbrowser.open_new_tab(doi_url)
+            update_status(f"{doi_url} opened in web browser.", success=True)
+        except Exception as e:
+            update_status(f"Error opening browser: {e}", error=True)
+    else:
+        update_status("DOI not found in the database.", error=True)
+    
 
 def download_selected_pdf():
     global selected_doi
@@ -742,6 +810,12 @@ style_config = {
         'font': ('Segoe UI', 12),
         'padding': 2
     },
+    'Refine.TButton': {
+        'background': '#599258',
+        'foreground': 'white',
+        'font': ('Segoe UI', 12),
+        'padding': 0.5
+    },
     'Bottom.TButton': {
         'background': '#599258',
         'foreground': 'white',
@@ -818,6 +892,10 @@ for style_name, app_config in style_config.items():
     style.configure(style_name, **app_config)
 
 style.map('Green.TButton',
+          background=[('active', '#457a3a'), ('pressed', '#2e4a20')],
+          foreground=[('disabled', '#d9d9d9')])
+
+style.map('Refine.TButton',
           background=[('active', '#457a3a'), ('pressed', '#2e4a20')],
           foreground=[('disabled', '#d9d9d9')])
 
@@ -917,6 +995,72 @@ add_placeholder()
 # Bind events pour gérer le focus
 input.bind("<FocusIn>", remove_placeholder)
 input.bind("<FocusOut>", restore_placeholder)
+# Refine
+
+style.configure("Refine.TEntry",
+                fieldbackground="#1E1E1E",  # fond noir identique aux Text
+                foreground="white",          # texte blanc
+                font=('Segoe UI', 13),
+                bordercolor="#1E1E1E",
+                borderwidth=3)
+
+refine_frame = ttk.Frame(main_frame, style='TFrame')
+refine_frame.pack(fill=tk.X, pady=(5,5))
+
+# Champ texte pour mot-clé
+refine_keyword = tk.StringVar()
+refine_entry = tk.Entry(refine_frame, textvariable=refine_keyword,
+                        width=30,
+                        bg="#1E1E1E", fg="white",
+                        insertbackground="white",
+                        relief="flat",  # supprime le contour
+                        font=('Segoe UI', 13))
+refine_entry.pack(side=tk.LEFT, padx=(0,5))
+
+
+# Tri par année
+refine_year_order = tk.StringVar(value="Relevance")
+
+year_sort_menu = tk.OptionMenu(refine_frame, refine_year_order, "Relevance", "Oldest first", "Newest first")
+year_sort_menu.config(
+    bg="#323232",
+    fg="white",
+    font=('Segoe UI', 13),
+    activebackground="#323232",
+    activeforeground="white",
+    relief="flat",
+    highlightthickness=0
+)
+year_sort_menu["menu"].config(
+    bg="#1E1E1E",
+    fg="white",
+    font=('Segoe UI', 13)
+)
+year_sort_menu.pack(side=tk.LEFT, padx=(0,5))
+
+# Bouton appliquer
+def apply_refine_filters():
+    global displayed_articles
+    filtered = initial_articles.copy()  # toujours partir de la liste complète
+    
+    keyword = refine_keyword.get().strip().lower()
+    if keyword:
+        filtered = [a for a in filtered if keyword in a["title"].lower() or keyword in a["field"].lower() or keyword in a["abstract"].lower()]
+
+    year_order = refine_year_order.get()
+    if year_order == "Oldest first":
+        filtered.sort(key=lambda x: int(x["year"]) if x["year"].isdigit() else 0)
+    elif year_order == "Newest first":
+        filtered.sort(key=lambda x: int(x["year"]) if x["year"].isdigit() else 0, reverse=True)
+    elif year_order == "Relevance":
+        filtered.sort(key=lambda x: x["_initial_pos"])
+    
+    displayed_articles = filtered.copy()
+    update_displayed_articles(displayed_articles)
+
+refine_btn = ttk.Button(refine_frame, text="Refine", command=apply_refine_filters, style="Refine.TButton")
+refine_btn.pack(side=tk.LEFT, padx=(5,0))
+
 
 # === ZONE DE SORTIE ÉTENDABLE ===
 output_expanded = tk.BooleanVar(value=False)
@@ -950,9 +1094,10 @@ question_context_menu.add_command(label="Paste", command=lambda: input.event_gen
 output_context_menu = tk.Menu(text_output, tearoff=0)
 output_context_menu.add_command(label="Use as reference for a new search", command=fetcher_selected)
 output_context_menu.add_command(label="Use as reference for a new graph", command=generate_graph_with_selection)
-output_context_menu.add_command(label="Use as context for the assistant –WIP–", command=parser)
+output_context_menu.add_command(label="Use as context for the assistant ––WIP––", command=parser)
+output_context_menu.add_command(label="Open in external browser", command=open_in_browser)
 output_context_menu.add_command(label="Download PDF from Open Access", command=download_selected_pdf)
-output_context_menu.add_command(label="Delete from database", command=delete_selected_publication)
+output_context_menu.add_command(label="Delete from the database", command=delete_selected_publication)
 
 def show_question_context_menu(event):
     try:
