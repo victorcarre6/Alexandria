@@ -446,7 +446,7 @@ def build_citation_graph_from_seed(seed_doi: str, depth, pause,
         
         frontier.extend(next_frontier)
     end_time = time.time()
-    print(f"[INFO] Récupération des DOI terminée pour {total_analyzed} publications analysées en {end_time-start_time:.1f}s.")
+    print(f"[INFO] Récupération des DOI terminée avec {total_analyzed} publications analysées en {end_time-start_time:.1f}s.")
     return citations_dict
                 
                 
@@ -543,9 +543,91 @@ def build_citation_graph_from_query(seed: str, depth, pause,
         
         frontier.extend(next_frontier)
     end_time = time.time()
-    print(f"[INFO] Récupération des DOI terminée pour {total_analyzed} publications analysées en {end_time-start_time:.1f}s.")
+    print(f"[INFO] Récupération des DOI terminée avec {total_analyzed} publications analysées en {end_time-start_time:.1f}s.")
     return citations_dict
 
+def build_citation_graph_from_pool(pool_dois: List[str], pause: float,
+                                   driver=None, batch_size: int = 50, graph_max_dois=250, depth=3):
+    """
+    Construit un graphe de citations en vase clos à partir d’un pool de DOIs donné.
+    Ne considère que les relations CITES entre DOIs appartenant au pool.
+    """
+    citations_dict: Dict[str, Dict[str, List[str]]] = {}
+    total_analyzed = 0
+    start_time = time.time()
+    frontier = deque([(doi, 0) for doi in pool_dois])
+    seen: Set[str] = set()
+
+    while frontier:
+        batch = []
+        while frontier and len(batch) < batch_size:
+            doi, level = frontier.popleft()
+            if doi not in seen and level <= depth:
+                # Vérifier la limite graph_max_dois
+                if graph_max_dois is not None and total_analyzed >= graph_max_dois:
+                    frontier.clear()  # stop exploration
+                    break
+                batch.append((doi, level))
+
+        if not batch:
+            break
+
+        batch_dois = [doi for doi, _ in batch]
+        batch_levels = [lvl for _, lvl in batch]
+
+        # Récupération des données en batch
+        s_time = time.time()
+        batch_data = get_data_in_batch(batch_dois)
+        e_time = time.time()
+        print(f"[DEBUG] Batch de {len(batch_dois)} DOI récupéré en {e_time - s_time:.2f}s")
+
+        # Préparer les insertions et la prochaine frontière
+        dois_to_insert = []
+        in_refs_batch = []
+        next_frontier = []
+
+        for doi, level in zip(batch_dois, batch_levels):
+            t0 = time.time()
+            refs = batch_data[doi].get("citations") or []  # <- s'assure que refs est une liste
+            seen.add(doi)
+            citations_dict[doi] = {"in": [r for r in refs if isinstance(r, str)]}
+            dois_to_insert.append(doi)
+            in_refs_batch.append(refs)
+            total_analyzed += 1
+            t1 = time.time()
+            
+            # Ajouter à la prochaine frontière si profondeur non atteinte
+            if level < depth:
+                for ref in refs:
+                    if ref not in seen:
+                        next_frontier.append((ref, level + 1))
+
+            #print(f"[Niveau {level}] {doi} → {len(refs)} citants [{total_analyzed} analyses en {t1-t_start:.1f}s].")
+
+        # Insertion dans Neo4j en batch optimisée avec UNWIND/FOREACH
+        if driver and dois_to_insert:
+            # Préparer la structure des données pour Cypher
+            papers = []
+            for doi, citations_in in zip(dois_to_insert, in_refs_batch):
+                papers.append({"doi": doi, "citations_in": [c for c in citations_in if c]})
+            cypher = """
+            UNWIND $papers AS paper
+            MERGE (p:Paper {doi: paper.doi})
+            FOREACH (citer_doi IN paper.citations_in |
+                MERGE (citer:Paper {doi: citer_doi})
+                MERGE (citer)-[:CITES]->(p)
+            )
+            """
+            with driver.session() as session:
+                session.run(cypher, papers=papers)
+
+        # Pause pour limiter le rythme des requêtes API
+        time.sleep(pause)
+        
+        frontier.extend(next_frontier)
+    end_time = time.time()
+    print(f"[INFO] Récupération des DOI pour un pool terminée avec {total_analyzed} publications analysées en {end_time-start_time:.1f}s.")
+    return citations_dict
 
 def generate_graph(driver, db_path, seed, depth, fetch_max_dois,  graph_max_dois, 
                    pause, batch_size, max_worker, 
@@ -883,6 +965,301 @@ def generate_graph(driver, db_path, seed, depth, fetch_max_dois,  graph_max_dois
     # Connecter événements
     fig.canvas.mpl_connect("motion_notify_event", on_motion)
     fig.canvas.mpl_connect("button_press_event", on_click)
+
+    # Fermer la connexion SQLite à la fermeture
+    def on_closing():
+        try:
+            conn.close()
+        except Exception:
+            pass
+        root.destroy()
+    root.protocol("WM_DELETE_WINDOW", on_closing)
+
+    root.mainloop()
+    
+def generate_graph_from_closed_pool(driver, db_path, pool_dois: List[str],
+                        pause: float, batch_size: int,
+                        edge_mode: str, weight_threshold: float,
+                        top_n: int, top_n_cites: int, top_n_score: int,
+                        top_n_cocit: int, top_n_coupling: int, graph_max_dois, depth):
+    """
+    Génère un graphe de citations et similarité à partir d’un pool de DOIs donné.
+    """
+    # 1. Vider Neo4j
+    with driver.session() as session:
+        session.run("MATCH (n) DETACH DELETE n")
+        print("[INFO] Base Neo4j vidée pour un nouvel essai")
+
+    # 2. Construire le graphe citations limité au pool (depth 1 ou paramétrable)
+    build_citation_graph_from_pool(pool_dois, pause=pause, driver=driver,
+                                   batch_size=batch_size, graph_max_dois=graph_max_dois, depth=depth)
+
+    # 3. Calculer les similarités
+    compute_similarity_in_batches(driver)
+
+    # 4. Récupération des arêtes
+    edges = []
+    with driver.session() as session:
+        # CITES
+        if edge_mode in ("CITES", "SIMILAR"):
+            cites_result = session.run("""
+                MATCH (a:Paper)-[:CITES]->(b:Paper)
+                WHERE a.doi IN $pool AND b.doi IN $pool
+                RETURN a.doi AS source, b.doi AS target
+            """, pool=list(pool_dois))
+            edges.extend([(rec["source"], rec["target"], {"type": "CITES"}) for rec in cites_result])
+
+        # Similarité
+        if edge_mode == "SIMILAR":
+            sim_result = session.run("""
+                MATCH (a:Paper)-[r:SIMILAR_TO]->(b:Paper)
+                RETURN a.doi AS source, b.doi AS target, r.weight AS weight
+                ORDER BY r.weight DESC
+            """)
+            cocit_result = session.run("""
+                MATCH (a:Paper)-[:SIMILAR_COCIT]->(b:Paper)
+                RETURN a.doi AS source, b.doi AS target
+            """)
+            coupling_result = session.run("""
+                MATCH (a:Paper)-[:SIMILAR_COUPLING]->(b:Paper)
+                RETURN a.doi AS source, b.doi AS target
+            """)
+            edges.extend([(rec["source"], rec["target"], {"type": "SIMILAR_TO", "weight": rec["weight"]})
+                          for rec in sim_result])
+            edges.extend([(rec["source"], rec["target"], {"type": "COCIT"}) for rec in cocit_result])
+            edges.extend([(rec["source"], rec["target"], {"type": "COUPLING"}) for rec in coupling_result])
+
+    # 5. Construire le graphe NetworkX
+    G = nx.Graph()
+
+    # Ajouter tous les DOIs du pool comme nœuds
+    for doi in pool_dois:
+        G.add_node(doi)
+
+    # Ajouter les arêtes filtrées
+    pool_set = set(pool_dois)
+    for u, v, d in edges:
+        if u not in pool_set or v not in pool_set:
+            continue  # ignorer les arêtes vers l'extérieur du pool
+
+        if d.get("type") == "SIMILAR_TO":
+            weight = d.get("weight", 0.0)
+            if weight >= weight_threshold:
+                G.add_edge(u, v, **d)
+        else:
+            G.add_edge(u, v, **d)
+
+    print(f"[INFO] Graphe pool construit : {len(G.nodes())} noeuds, {len(G.edges())} arêtes.")
+
+
+
+    # === Visualisation Matplotlib dans Tkinter ===
+    root = tk.Tk()
+    root.title(f'Semantic bibliography graph starting from a DOI pool.')
+
+    # Connexion SQLite pour métadonnées
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+
+    # Layout du graphe
+    pos = nx.spring_layout(G, weight="weight", k=0.5, iterations=100)
+
+    # Louvain pour la couleur des communautés (uniquement sur arêtes présentes)
+    if len(G.nodes()) > 0:
+        partition = community_louvain.best_partition(G, weight='weight')
+        cmap = cm.get_cmap('tab20', max(partition.values())+1)
+        node_colors = [cmap(partition[n]) for n in G.nodes()]
+    else:
+        partition = {}
+        node_colors = []
+
+    # Taille des nœuds selon la force
+    strength = {node: sum(d.get("weight", 1.0) for _,_,d in G.edges(node, data=True)) for node in G.nodes()}
+    if strength:
+        max_strength = max(strength.values())
+    else:
+        max_strength = 0
+
+    sizes = []
+    for n in G.nodes():
+        if max_strength > 0:
+            sizes.append(150 + 350 * (strength.get(n, 0) / max_strength))
+        else:
+            sizes.append(150)  # valeur par défaut si pas d'arêtes
+
+    # Bordures
+    node_border_colors = []
+    node_border_widths = []
+    for n in G.nodes():
+        if n == pool_dois:
+            node_border_colors.append("#319A31")
+            node_border_widths.append(2)
+        else:
+            node_border_colors.append("black")
+            node_border_widths.append(0.5)
+
+    # Récupérer les métadonnées pour chaque nœud
+    node_metadatas = {}
+    for n in G.nodes():
+        c.execute("""
+            SELECT m.title, m.authors, m.year, m.journal, m.paper_type, p.abstract
+            FROM metadatas m
+            LEFT JOIN paper_data p ON m.doi = p.doi
+            WHERE m.doi = ?
+        """, (n,))
+        row = c.fetchone()
+        if row:
+            title, authors, year, journal, paper_type, abstract = row
+            node_metadatas[n] = {
+                "title": title,
+                "authors": authors,
+                "year": year,
+                "journal": journal,
+                "paper_type": paper_type,
+                "abstract": abstract
+            }
+        else:
+            node_metadatas[n] = {}
+
+    # Libellé du nœud: premier auteur + année
+    node_labels = {}
+    for n in G.nodes():
+        meta = node_metadatas[n]
+        label = ""
+        if meta.get("authors"):
+            first_author = meta["authors"].split(",")[0].strip()
+            label = first_author
+        if meta.get("year"):
+            label += f" {meta['year']}" if label else meta["year"]
+        node_labels[n] = label if label else n[:8]
+
+    # === Matplotlib ===
+    fig, ax = plt.subplots(figsize=(9, 7))
+    plt.subplots_adjust(left=0.01, right=0.99, top=0.96, bottom=0.01)
+
+    # Edges selon EDGE_MODE
+    cites_edges = [(u, v) for u, v, d in G.edges(data=True) if d.get("type") == "CITES"]
+    sim_edges = [(u, v) for u, v, d in G.edges(data=True) if d.get("type") == "SIMILAR_TO"]
+    cocit_edges = [(u, v) for u, v, d in G.edges(data=True) if d.get("type") == "COCIT"]
+    coupling_edges = [(u, v) for u, v, d in G.edges(data=True) if d.get("type") == "COUPLING"]
+
+    if cites_edges:
+        nx.draw_networkx_edges(G, pos, ax=ax, edgelist=cites_edges,
+                                width=1, edge_color="#333333", style="solid")
+    if edge_mode == "SIMILAR" and sim_edges:
+        nx.draw_networkx_edges(G, pos, ax=ax, edgelist=sim_edges,
+                            width=1, edge_color="#821717", style="solid")
+    if edge_mode == "SIMILAR" and cocit_edges:
+        nx.draw_networkx_edges(G, pos, ax=ax, edgelist=cocit_edges,
+                            width=0.5, edge_color="#888888", style="solid", alpha=0.8)
+    if edge_mode == "SIMILAR" and coupling_edges:
+        nx.draw_networkx_edges(G, pos, ax=ax, edgelist=coupling_edges,
+                            width=1, edge_color="#821717", style="solid")
+
+    # Nodes
+    nodes_artist = nx.draw_networkx_nodes(
+        G, pos, ax=ax, node_color=node_colors, node_size=sizes,
+        edgecolors=node_border_colors, linewidths=node_border_widths
+    )
+
+    # Labels
+    nx.draw_networkx_labels(G, pos, labels=node_labels, font_size=8, ax=ax)
+    ax.set_axis_off()
+    fig.tight_layout()
+
+    # Tkinter canvas
+    canvas = FigureCanvasTkAgg(fig, master=root)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill=tk.BOTH, expand=1)
+
+    
+
+    # Label pour info détaillée (désormais inutilisé)
+    info_label = tk.Label(root, text="Survolez un nœud pour voir les détails.", anchor="w", justify="left", wraplength=700)
+    info_label.pack(fill=tk.X, padx=10, pady=5)
+
+    # Mapping matplotlib (pixels) <-> nœud pour survol/clic
+    node_coords = {}
+    for n in G.nodes():
+        x, y = pos[n]
+        # matplotlib scatter: data coordinates, need to transform to display coords
+        node_coords[n] = (x, y)
+
+    # Utilitaire: trouver le nœud le plus proche d'un point (en axes coords)
+    def get_node_under_cursor(event):
+        if event.inaxes != ax:
+            return None
+        # event.xdata, event.ydata: axes coords
+        min_dist = float("inf")
+        closest = None
+        for n, (x, y) in node_coords.items():
+            dx = event.xdata - x if event.xdata is not None else 999
+            dy = event.ydata - y if event.ydata is not None else 999
+            dist = (dx*dx + dy*dy)**0.5
+            r = (sizes[list(G.nodes()).index(n)]**0.5)/140 # approx radius in axes
+            if dist < r and dist < min_dist:
+                min_dist = dist
+                closest = n
+        return closest
+
+    # Affichage des infos au survol avec cadre flottant
+    def on_motion(event):
+        global tooltip
+        n = get_node_under_cursor(event)
+        if n:
+            meta = node_metadatas[n]
+            txt = f"DOI: {n}"
+            if meta.get("title"):
+                txt += f"\nTitre: {meta['title']}"
+            if meta.get("authors"):
+                txt += f"\nAuteurs: {meta['authors']}"
+            if meta.get("year"):
+                txt += f"\nAnnée: {meta['year']}"
+            if meta.get("journal"):
+                txt += f"\nJournal: {meta['journal']}"
+            if meta.get("type"):
+                txt += f"\nType: {meta['type']}"
+            if meta.get("abstract"):
+                txt += f"\nAbstract: {meta['abstract']}"
+            txt += f"\nWeight: {strength[n]:.2f}"
+            # Afficher le tooltip flottant près du curseur
+            # Obtenir la position du curseur dans la fenêtre racine
+            if event.guiEvent is not None:
+                cursor_x = event.guiEvent.x_root
+                cursor_y = event.guiEvent.y_root
+            else:
+                # Fallback: placer au centre
+                cursor_x = root.winfo_pointerx()
+                cursor_y = root.winfo_pointery()
+            # Créer ou mettre à jour le tooltip
+            if tooltip is None or not tooltip.winfo_exists():
+                tooltip = tk.Toplevel(root)
+                tooltip.wm_overrideredirect(True)
+                tooltip.attributes("-topmost", True)
+                tooltip.label = tk.Label(
+                    tooltip,
+                    text=txt,
+                    justify="left",
+                    bg="white",
+                    fg="black",
+                    relief="solid",
+                    borderwidth=1,
+                    wraplength=400,
+                    font=("Arial", 10)
+                )
+                tooltip.label.pack(ipadx=4, ipady=2)
+
+            else:
+                tooltip.label.config(text=txt)
+            # Positionner le tooltip à côté de la souris (offset pour éviter de cacher le curseur)
+            tooltip.geometry(f"+{cursor_x+5}+{cursor_y+5}")
+        else:
+            # Masquer le tooltip si visible
+            if tooltip is not None and tooltip.winfo_exists():
+                tooltip.destroy()
+                tooltip = None
+    # Connecter événements
+    fig.canvas.mpl_connect("motion_notify_event", on_motion)
 
     # Fermer la connexion SQLite à la fermeture
     def on_closing():

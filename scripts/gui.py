@@ -11,12 +11,13 @@ from neo4j import GraphDatabase
 import networkx as nx
 import sys
 import webbrowser
+import sqlite3
 
 from metadatas.fetch_ss import get_last_papers_from_query, get_unpaywall_pdf, insert_articles_into_sqlite
 #from metadatas.fetch_subject import insert_articles_into_sqlite
 from metadatas import downloader
 from metadatas import docling
-from connections.sim_graph import generate_graph
+from connections.sim_graph import generate_graph, generate_graph_from_closed_pool
 
 # -----------------------
 #     Initialisation
@@ -27,87 +28,321 @@ from connections.sim_graph import generate_graph
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT_DIR))
 
-keys_path = ROOT_DIR / "keys.json"
+keys_path = ROOT_DIR / "resources" / "keys.json"
 with open(keys_path) as f:
     keys = json.load(f)
 
 NEO4J_URI = keys["NEO4J_URI"]
 NEO4J_USERNAME = keys["NEO4J_USERNAME"]
 NEO4J_PASSWORD = keys["NEO4J_PASSWORD"]
-email = keys["EMAIL"]
+EMAIL = keys["EMAIL"]
+
+
+# --- DEBUG print ---
+print(f"[DEBUG] Keys loaded: URI={NEO4J_URI}, USER={NEO4J_USERNAME}, EMAIL={EMAIL}, PASSWORD={NEO4J_PASSWORD}")
 
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
 G: nx.Graph = nx.Graph()
 
-DB_PATH = "datas/bibliography.db"
+def load_config(config_path):
+    config_path = expand_path(config_path)
+    with open(config_path, "r", encoding="utf-8") as f:
+        raw_config = json.load(f)
+    config = raw_config
+    return config
+
+def expand_path(value):
+    if isinstance(value, Path):
+        return str(value.resolve())
+    expanded = Path(os.path.expanduser(value))
+    if not expanded.is_absolute():
+        expanded = ROOT_DIR / expanded
+    return str(expanded.resolve())
+
+CONFIG_PATH = ROOT_DIR / "resources" / "config.json"
+config = load_config(CONFIG_PATH)
+DB_PATH = ROOT_DIR / "datas" / "bibliography.db"
 
 # === Paramètres ===
 
+# --- Graph ---
+root = tk.Tk()
+
+total_analyzed = 0
+displayed_dois = []
+selected_doi = None
+
 PATIENT_ZERO = ""
 
-# --- Fetch ---
+fetch_conf = config.get("fetch", {})
+graph_conf = config.get("graph", {})
+database_conf = config.get("database", {})
+DEPTH = tk.IntVar(value=fetch_conf.get("DEPTH", 3))
+FETCH_MAX_DOIS = tk.IntVar(value=fetch_conf.get("FETCH_MAX_DOIS", 50))
+GRAPH_MAX_DOIS = tk.IntVar(value=fetch_conf.get("GRAPH_MAX_DOIS", 500))
+DATES = tk.StringVar(value=fetch_conf.get("DATES", "2010-"))
+SORT_BY = tk.StringVar(value=fetch_conf.get("SORT_BY", "relevance"))
+PAUSE = tk.IntVar(value=fetch_conf.get("PAUSE", 0.5))
+BATCH_SIZE = tk.IntVar(value=fetch_conf.get("BATCH_SIZE", 100))
+MAX_WORKER = tk.IntVar(value=fetch_conf.get("MAX_WORKER", 10))
+EDGE_MODE = tk.StringVar(value=graph_conf.get("EDGE_MODE", "SIMILAR"))
+WEIGHT_THRESHOLD = tk.IntVar(value=graph_conf.get("WEIGHT_THRESHOLD", 10))
+TOP_N = tk.IntVar(value=graph_conf.get("TOP_N", 1))
+TOP_N_CITES = tk.IntVar(value=graph_conf.get("TOP_N_CITES", 30))
+TOP_N_SCORE = tk.IntVar(value=graph_conf.get("TOP_N_SCORE", 10))
+TOP_N_COCIT = tk.IntVar(value=graph_conf.get("TOP_N_COCIT", 10))
+TOP_N_COUPLING = tk.IntVar(value=graph_conf.get("TOP_N_COUPLING", 10))
+EPHEMERAL_MODE = tk.BooleanVar(value=database_conf.get("EPHEMERAL", False))
 
-max_results = 20
-year_from = 2015
-year_to = 2026
+def reset_to_defaults(settings_window=None):
+    # Valeurs par défaut des variables
+    DEFAULTS = {
+        "DEPTH": 3,
+        "FETCH_MAX_DOIS": 50,
+        "GRAPH_MAX_DOIS": 500,
+        "PAUSE": 0.5,
+        "BATCH_SIZE": 100,
+        "MAX_WORKER": 10,
+        "EDGE_MODE": "SIMILAR", # "CITES", "SIMILAR"
+        "WEIGHT_THRESHOLD": 10,
+        "TOP_N": 1,
+        "TOP_N_CITES": 30,
+        "TOP_N_SCORE": 10,
+        "TOP_N_COCIT": 10,
+        "TOP_N_COUPLING": 10,
+        "EPHEMERAL": False
+    }
 
-email = "victorcarre@icloud.com"
-divided_max_results = round(max_results/3)
+    # Appliquer les valeurs par défaut aux variables dans le config.json
+    DEPTH.set(DEFAULTS["DEPTH"])
+    GRAPH_MAX_DOIS.set(DEFAULTS["GRAPH_MAX_DOIS"])
+    EDGE_MODE.set(DEFAULTS["EDGE_MODE"])
+    TOP_N.set(DEFAULTS["TOP_N"])
+    DATES.set(DEFAULTS["DATES"])
+    SORT_BY.set(DEFAULTS["SORT_BY"])
+    EPHEMERAL_MODE.set(DEFAULTS["EPHEMERAL"])
+    
+    update_status("Settings reset to defaults.", success=True)
+    root.update()
+
+    if settings_window is not None:
+        settings_window.destroy()
+
+def save_gui_config(*args):
+    config["fetch"]["DEPTH"] = DEPTH.get()
+    config["fetch"]["GRAPH_MAX_DOIS"] = GRAPH_MAX_DOIS.get()
+    config["fetch"]["DATES"] = DATES.get()
+    config["fetch"]["SORT_BY"] = SORT_BY.get()
+    config["graph"]["EDGE_MODE"] = EDGE_MODE.get()
+    config["graph"]["TOP_N"] = TOP_N.get()
+    config["database"]["EPHEMERAL"] = EPHEMERAL_MODE.get()
+    with open(expand_path(CONFIG_PATH), "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
 
 
-# --- Graph ---
-
-DEPTH = 4
-FETCH_MAX_DOIS = 20
-GRAPH_MAX_DOIS = 500
-
-
-PAUSE = 0.5
-BATCH_SIZE = 100
-MAX_WORKER = 10
-
-EDGE_MODE = "SIMILAR"   # "CITES", "SIMILAR"
-WEIGHT_THRESHOLD = 10
-TOP_N = 1
-TOP_N_CITES = 30
-TOP_N_SCORE = 10
-TOP_N_COCIT = 10
-TOP_N_COUPLING = 10
-
-root = tk.Tk()
-total_analyzed = 0
+# Sauvegarde automatique des paramètres
+DEPTH.trace_add("write", save_gui_config)
+GRAPH_MAX_DOIS.trace_add("write", save_gui_config)
+EDGE_MODE.trace_add("write", save_gui_config)
+TOP_N.trace_add("write", save_gui_config)
+DATES.trace_add("write", save_gui_config)
+SORT_BY.trace_add("write", save_gui_config)
+EPHEMERAL_MODE.trace_add("write", save_gui_config)
 
 # -----------------------
 #        Fonctions
 # -----------------------
 
+def generate_graph_with_selection():
+    global selected_doi
+    if selected_doi:
+        generate_graph_selected()
+    else:
+        on_sim_graph_pool()
+        
+def select_doi(doi):
+    global selected_doi
+    selected_doi = doi
+    update_status(f"Selected DOI: {doi}")  # Affiche le DOI sélectionné dans la barre de statut
+
+def delete_selected_publication():
+    global selected_doi, displayed_dois
+    if not selected_doi:
+        update_status("No publication selected for deletion.", error=True)
+        return
+
+    confirm = messagebox.askyesno(
+        "Delete Publication",
+        f"Are you sure you want to delete DOI {selected_doi} from the database?"
+    )
+    if not confirm:
+        return
+
+    try:
+        # Suppression depuis SQLite
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("DELETE FROM paper_data WHERE doi=?", (selected_doi,))
+        c.execute("DELETE FROM metadatas WHERE doi=?", (selected_doi,))
+        conn.commit()
+        conn.close()
+
+        update_status(f"Publication {selected_doi} deleted from database.")
+
+        # Réinitialiser la sélection
+        selected_doi = None
+
+    except Exception as e:
+        update_status(f"Error deleting publication: {e}", error=True)
+
+def generate_graph_selected():
+    global selected_doi
+    if selected_doi:
+        # Appeler la fonction classique on_sim_graph avec le DOI sélectionné
+        input.delete("1.0", tk.END)
+        input.insert(tk.END, selected_doi)
+        on_sim_graph()
+    else:
+        update_status("No DOI selected", error=True)
+          
+
+def fetcher_selected():
+    global selected_doi
+    if selected_doi:
+        # Appeler la fonction classique on_sim_graph avec le DOI sélectionné
+        input.delete("1.0", tk.END)
+        input.insert(tk.END, selected_doi)
+        
+        fetcher_ss()
+    else:
+        update_status("No DOI selected", error=True)
+
 # === Principales ===
 
 def on_sim_graph():
-
     patient_zero =  input.get("1.0", tk.END).strip()
+    _DEPTH = DEPTH.get()
+    _GRAPH_MAX_DOIS = GRAPH_MAX_DOIS.get()
+    _EDGE_MODE = EDGE_MODE.get()
+    _TOP_N = TOP_N.get()
 
-    generate_graph(driver, DB_PATH, patient_zero, DEPTH, FETCH_MAX_DOIS, GRAPH_MAX_DOIS, 
-                    PAUSE, BATCH_SIZE, MAX_WORKER, 
-                    EDGE_MODE, WEIGHT_THRESHOLD, 
-                    TOP_N, TOP_N_CITES, TOP_N_SCORE, TOP_N_COCIT, TOP_N_COUPLING)
+    _DATES = DATES.get()
+    _SORT_BY = SORT_BY.get()
+    _EPHEMERAL_MODE = EPHEMERAL_MODE.get()
+    update_status("Generating semantic graph ...")
+    root.update()
+    results = generate_graph(driver, DB_PATH, patient_zero, _DEPTH, FETCH_MAX_DOIS.get(), _GRAPH_MAX_DOIS, 
+                   PAUSE.get(), BATCH_SIZE.get(), MAX_WORKER.get(), 
+                   _EDGE_MODE, WEIGHT_THRESHOLD.get(), 
+                   _TOP_N, TOP_N_CITES.get(), TOP_N_SCORE.get(), TOP_N_COCIT.get(), TOP_N_COUPLING.get())
+    articles = []
+    for doi, data in results.items():
+        field_list = []
+        field_val = data.get("field")
+        if isinstance(field_val, str) and field_val:
+            field_list.extend([f.strip() for f in field_val.split(",") if f.strip()])
+        elif isinstance(field_val, list):
+            field_list.extend([str(f).strip() for f in field_val if str(f).strip()])
+        if patient_zero:
+            field_list.append(patient_zero)
 
-def fetcher_ss(limit=FETCH_MAX_DOIS, db_path=DB_PATH):
+        articles.append({
+            "field": "; ".join(field_list) if field_list else patient_zero,
+            "paper_type": data.get("paper_type", data.get("publicationTypes", "")),
+            "title": data.get("title", ""),
+            "authors": str(data.get("authors", "")),
+            "doi": data.get("doi", doi),
+            "journal": data.get("journal", ""),
+            "year": data.get("year", ""),
+            "volume": data.get("volume", ""),
+            "issue": data.get("issue", ""),
+            "pages": data.get("pages", ""),
+            "source": "SemanticScholar",
+            "pdf_link": data.get("pdf_link", ""),
+            "abstract": data.get("abstract", "")
+        })
+
+    text_output.delete("1.0", tk.END)
+    text_output.insert(tk.END, f"[Graph] {len(articles)} articles affichés.\n\n")
+
+    for i, article in enumerate(articles, start=1):
+        doi = article["doi"]
+        displayed_dois.append(doi)
+        start_index = text_output.index(tk.END)
+        text_output.insert(tk.END, f"{i}. {article['title']}\n")
+        text_output.insert(tk.END, f"   {article['authors']}\n")
+        journal_line = f"   {article['journal']} ({article['year']})"
+        if article['volume']:
+            journal_line += f", {article['volume']}"
+        if article['issue']:
+            journal_line += f", {article['issue']}"
+        if article['pages']:
+            journal_line += f", {article['pages']}."
+        text_output.insert(tk.END, journal_line + "\n")
+        text_output.insert(tk.END, f"   doi:{article['doi']}\n")
+        if article['pdf_link']:
+            text_output.insert(tk.END, f"   Open Access available at {article['pdf_link']}\n\n")
+        if article['abstract']:
+            text_output.insert(tk.END, f"{article['abstract']}\n\n")
+
+        # Tag sur le DOI
+        tag_name = f"doi_{i}"
+        end_index = text_output.index(tk.END)
+        text_output.tag_add(tag_name, start_index, end_index)
+        text_output.tag_bind(tag_name, "<Button-1>", lambda e, d=doi: select_doi(d))
+        text_output.tag_bind(tag_name, right_click_event, lambda e, d=doi: select_doi(d))
+    update_status("Graph generation completed")
+    root.update()
+
+
+def on_sim_graph_pool():
+    global displayed_dois
+    print("DEBUG displayed_dois avant appel:", displayed_dois)
+    batch_size = 100
+    _EDGE_MODE = EDGE_MODE.get()
+    _TOP_N = TOP_N.get()
+
+    _DATES = DATES.get()
+    _SORT_BY = SORT_BY.get()
+    _EPHEMERAL_MODE = EPHEMERAL_MODE.get()
+    
+    update_status("Generating semantic graph from selected publications ...")
+    root.update()
+    generate_graph_from_closed_pool(driver, DB_PATH, displayed_dois, PAUSE.get(), batch_size, 
+                                    _EDGE_MODE, WEIGHT_THRESHOLD.get(), 
+                                    _TOP_N, TOP_N_CITES.get(), TOP_N_SCORE.get(), 
+                                    TOP_N_COCIT.get(), TOP_N_COUPLING.get(), 
+                                    graph_max_dois=500, depth=2)
+    update_status("Graph generation completed")
+    root.update()
+
+def fetcher_ss(limit=None, email=None, db_path=str(DB_PATH)):
     patient_zero = input.get("1.0", tk.END).strip()
+    if limit is None:
+        limit = FETCH_MAX_DOIS.get()
+    if email is None:
+        email = EMAIL
+
+
+    update_status("Fetching publications from Semantic Scholar ...")
+    root.update()
     print(f"[fetcher_ss] Starting fetch for: '{patient_zero}' with limit={limit}")
 
-    print("[fetcher_ss] Calling get_last_papers_from_query...")
-    raw_results = get_last_papers_from_query(patient_zero, limit)  # dict {doi: {...}}
-    print(f"[fetcher_ss] get_last_papers_from_query returned {len(raw_results)} results.")
+    raw_results = get_last_papers_from_query(patient_zero, limit)
+    update_status(f"{len(raw_results)} publications retrieved from Semantic Scholar")
+    root.update()
 
     articles = []
     for doi, data in raw_results.items():
         # Combine patient_zero with field from API
         field_list = []
-        # In fetch_ss.py, 'field' is a string (comma-joined fields)
-        if data.get("field"):
+        field_val = data.get("field")
+        if isinstance(field_val, str) and field_val:
             # Split the string into a list, stripping whitespace
-            field_list.extend([f.strip() for f in data["field"].split(",") if f.strip()])
+            field_list.extend([f.strip() for f in field_val.split(",") if f.strip()])
+        elif isinstance(field_val, list):
+            # Already a list, just strip each element
+            field_list.extend([str(f).strip() for f in field_val if str(f).strip()])
         if patient_zero:
             field_list.append(patient_zero)
         print(f"[fetcher_ss] Built fields for DOI {doi}: {field_list}")
@@ -127,14 +362,19 @@ def fetcher_ss(limit=FETCH_MAX_DOIS, db_path=DB_PATH):
             "abstract": data.get("abstract", "")
         })
 
-    print(f"[fetcher_ss] Prepared {len(articles)} articles for insertion.")
-    print("[fetcher_ss] Calling insert_articles_into_sqlite...")
-    insert_articles_into_sqlite(articles, email=email, db_path=db_path)
-    print("[fetcher_ss] insert_articles_into_sqlite finished.")
+    update_status("Inserting publications into local database ...")
+    root.update()
+    insert_articles_into_sqlite(articles, email, db_path)
+    update_status(f"{len(articles)} publications fetched and added to the database")
+    root.update()
+    
     text_output.delete("1.0", tk.END)
     text_output.insert(tk.END, f"[SemanticScholar] {len(articles)} articles insérés.\n\n")
 
     for i, article in enumerate(articles, start=1):
+        doi = article["doi"]
+        displayed_dois.append(article["doi"])
+        start_index = text_output.index(tk.END)
         text_output.insert(tk.END, f"{i}. {article['title']}\n")
         text_output.insert(tk.END, f"   {article['authors']}\n")
         journal_line = f"   {article['journal']} ({article['year']})"
@@ -150,11 +390,146 @@ def fetcher_ss(limit=FETCH_MAX_DOIS, db_path=DB_PATH):
             text_output.insert(tk.END, f"   Open Access available at {article['pdf_link']}\n\n")
         if article['abstract']:
             text_output.insert(tk.END, f"{article['abstract']}\n\n")
+        # Tag sur le DOI
+        tag_name = f"doi_{i}"
+        end_index = text_output.index(tk.END)
+        text_output.tag_add(tag_name, start_index, end_index)
+        text_output.tag_bind(tag_name, "<Button-1>", lambda e, d=doi: select_doi(d))
+        text_output.tag_bind(tag_name, right_click_event, lambda e, d=doi: select_doi(d))
+
+def get_publication_by_doi(doi: str, db_path):
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    
+    c.execute("""
+        SELECT m.doi, m.field, m.title, m.authors, m.year, m.journal, 
+               m.paper_type, m.volume, m.issue, m.pages, p.abstract, p.pdf_link
+        FROM metadatas m
+        LEFT JOIN paper_data p ON m.doi = p.doi
+        WHERE m.doi = ?
+    """, (doi,))
+    
+    row = c.fetchone()
+    conn.close()
+    
+    if row:
+        keys = ["doi", "field", "title", "authors", "year", "journal", 
+                "paper_type", "volume", "issue", "pages", "abstract", "pdf_link"]
+        return dict(zip(keys, row))
+    else:
+        return None
+
+def get_publication_by_keywords(keywords, db_path):
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    
+    query = """
+        SELECT m.doi, m.field, m.title, m.authors, m.year, m.journal, 
+               m.paper_type, m.volume, m.issue, m.pages, p.abstract, p.pdf_link
+        FROM metadatas m
+        LEFT JOIN paper_data p ON m.doi = p.doi
+        WHERE m.title LIKE ? OR m.authors LIKE ? OR m.field LIKE ?
+    """
+    
+    pattern = f"%{keywords}%"
+    c.execute(query, (pattern, pattern, pattern))
+    rows = c.fetchall()
+    conn.close()
+    
+    keys = ["doi", "field", "title", "authors", "year", "journal", 
+            "paper_type", "volume", "issue", "pages", "abstract", "pdf_link"]
+    return [dict(zip(keys, row)) for row in rows]
+
+def get_from_base(db_path=DB_PATH):
+    query = input.get("1.0", tk.END).strip()
+    text_output.delete("1.0", tk.END)
+
+    if query.startswith("10."):  # cas DOI
+        update_status(f"Retrieving publication informations from database with DOI {query}")
+        root.update()
+        result = get_publication_by_doi(query, db_path)
+        update_status(f"Publications DOI:{query} retrieved from the database")
+        root.update()
+        if result:
+            results = [result]  # on l’enveloppe dans une liste pour itérer de la même façon
+        else:
+            results = []
+    else:  # cas mots-clés
+        update_status(f'Retrieving publications informations from database with keyword "{query}"')
+        root.update()
+        results = get_publication_by_keywords(query, db_path)
+        update_status(f"{len(results)} publications retrieved from the database")
+        root.update()
+
+    for i, res in enumerate(results, start=1):
+        doi = res["doi"]
+        displayed_dois.append(res["doi"])
+        start_index = text_output.index(tk.END)
+        text_output.insert(tk.END, f"{i}. {res['title']}\n")
+        text_output.insert(tk.END, f"   {res['authors']}\n")
+        journal_line = f"   {res['journal']} ({res['year']})"
+        if res['volume']:
+            journal_line += f", {res['volume']}"
+        if res['issue']:
+            journal_line += f", {res['issue']}"
+        if res['pages']:
+            journal_line += f", {res['pages']}."
+        text_output.insert(tk.END, journal_line + "\n")
+        text_output.insert(tk.END, f"   doi:{res['doi']}\n")
+        if res['pdf_link']:
+            text_output.insert(tk.END, f"   Open Access available at {res['pdf_link']}\n\n")
+        if res['abstract']:
+            text_output.insert(tk.END, f"{res['abstract']}\n\n")
+        # Tag sur le DOI
+        tag_name = f"doi_{i}"
+        end_index = text_output.index(tk.END)
+        text_output.tag_add(tag_name, start_index, end_index)
+        text_output.tag_bind(tag_name, "<Button-1>", lambda e, d=doi: select_doi(d))
+        text_output.tag_bind(tag_name, right_click_event, lambda e, d=doi: select_doi(d))
+        
+
+def download_selected_pdf():
+    global selected_doi
+    if not selected_doi:
+        update_status("No publication selected for download.", error=True)
+        return
+    
+    record = get_publication_by_doi(selected_doi, DB_PATH)
+    if record and record.get("pdf_link"):
+        result = downloader.download(record)
+        local_path = result.get("local_path")
+        if local_path:
+            update_status(f"PDF downloaded to: {local_path}", success=True)
+        else:
+            update_status("PDF could not be downloaded.", error=True)
+    else:
+        update_status("No Open Access PDF available for the selected publication.", error=True)   
 
 def parser():
     pass  # TODO: implement context parsing
     
 # === Affichage ===
+
+def open_quickstart():
+    sp_window = tk.Toplevel(root)
+    sp_window.title("System Prompt")
+    sp_window.geometry("450x325")
+    sp_window.configure(bg="#323232")
+    sp_window.resizable(False, False)
+
+    sp_frame = ttk.Frame(sp_window, padding=10, style="TFrame")
+    sp_frame.pack(fill=tk.BOTH, expand=False)
+    
+def open_routines():
+    sp_window = tk.Toplevel(root)
+    sp_window.title("System Prompt")
+    sp_window.geometry("450x325")
+    sp_window.configure(bg="#323232")
+    sp_window.resizable(False, False)
+
+    sp_frame = ttk.Frame(sp_window, padding=10, style="TFrame")
+    sp_frame.pack(fill=tk.BOTH, expand=False)
+
 
 def bring_to_front():
     root.update()
@@ -211,6 +586,142 @@ def update_status(message, error=False, success=False):
 def open_github(event):
     webbrowser.open_new("https://github.com/victorcarre6")
     
+def open_settings():
+    settings_window = tk.Toplevel(root)
+    settings_window.title("Settings")
+    settings_window.geometry("250x350")
+    settings_window.configure(bg="#323232")
+    settings_window.resizable(False, False)
+
+    settings_frame = ttk.Frame(settings_window, padding=10, style='TFrame')
+    settings_frame.pack(fill=tk.BOTH, expand=True)
+
+    label_depth_count = ttk.Label(settings_frame, text=f"Depth: {DEPTH.get()}", style='TLabel')
+    label_depth_count.pack(anchor='center')
+
+    slider_depth = ttk.Scale(
+        settings_frame,
+        from_=1,
+        to=8,
+        orient="horizontal",
+        variable=DEPTH,
+        length=150,
+        command=lambda val: label_depth_count.config(text=f"Depth: {int(float(val))}")
+    )
+    slider_depth.pack(anchor='center', pady=(0,5))
+
+
+    label_max_dois_count = ttk.Label(settings_frame, text=f"Max pre-filtered results: {GRAPH_MAX_DOIS.get()}", style='TLabel')
+    label_max_dois_count.pack(anchor='center')
+
+    slider_max_dois = ttk.Scale(
+        settings_frame,
+        from_=100,
+        to=5000,
+        orient=tk.HORIZONTAL,
+        variable=GRAPH_MAX_DOIS,
+        length=150,
+        command=lambda val: label_max_dois_count.config(text=f"Max pre-filtered results: {int(float(val))}")
+    )
+    slider_max_dois.pack(anchor='center', pady=(0,10))
+
+    label_top_n_count = ttk.Label(settings_frame, text=f"Retrieved publications: {TOP_N.get():1}", style='TLabel')
+    label_top_n_count.pack(anchor='center')
+
+    slider_top_n = ttk.Scale(
+        settings_frame,
+        from_=1,
+        to=100,
+        orient=tk.HORIZONTAL,
+        variable=TOP_N,
+        length=150,
+        command=lambda val: label_top_n_count.config(text=f"Retrieved publications: {int(float(val))}")
+    )
+    slider_top_n.pack(anchor='center', pady=(0,5))
+
+    """
+    Ici menu déroulant vers le bas, qui permet de choisir deux fois soit un tiret soit un entier (1980 à 2026).
+    Le but est que ce soit une phrase qui soit affichée, telle que "Get publications from {premier menu} to {second menu}.
+    La variable est pour l'instant appelée dates_count, voir pour l'utiliser tel quel en adaptant les deux dates ou alors en faisant deux variables distinctes.
+    Attention, il faut penser au cas où l'utilisateur choisi une date de la borne inférieure correspondant à un date ultérieure à la borne supérieure. 
+    Dans ce cas, prévoir un message d'erreur type "The dates that you selected aren't possible", ou alors tout simplement retourner les deux bornes.
+    """
+
+    """
+    Ici menu déroulant vers le bas, qui permet de choisir le type de tri effectué sur les publications récupérées et affichées dans l'output.
+    Le but est que ce soit une phrase qui soit affichée, telle que "Sort publications by {variable}.
+    La variable est pour l'instant appelée sort_by, et est passée dans l'API semantic scholar, au sein de "query". Elle peut valoir "relevance" ou "date".
+    """
+
+    chk_edge_mode = ttk.Checkbutton(
+        settings_frame,
+        text="Citing-only graph",
+        variable=EDGE_MODE,
+        style='Custom.TCheckbutton'
+    )
+    chk_edge_mode.pack(anchor='center', pady=2)
+
+    chk_ephemeral_mode = ttk.Checkbutton(
+        settings_frame,
+        text="Don't save new publications",
+        variable=EPHEMERAL_MODE,
+        style='Custom.TCheckbutton'
+    )
+    chk_ephemeral_mode.pack(anchor='center', pady=(5,5))
+
+    spacer = ttk.Label(settings_frame, text="")
+    spacer.pack(pady=(5,0))
+
+    buttons_frame = ttk.Frame(settings_frame)
+    buttons_frame.pack(anchor='center', pady=(0,10))
+
+    quickstart_btn = ttk.Button(
+        buttons_frame,
+        text="Quickstart",
+        command=open_quickstart,
+        style="Settings.TButton",
+        cursor="hand2"
+    )
+    quickstart_btn.pack(side="left", padx=5)
+
+    routines_btn = ttk.Button(
+        buttons_frame,
+        text="Routines",
+        command=open_routines,
+        style="Settings.TButton",
+        cursor="hand2"
+    )
+    routines_btn.pack(side="left", padx=5)
+
+    reset_btn = ttk.Button(
+        settings_frame,
+        text="Reset settings",
+        command=lambda: reset_to_defaults(settings_window),
+        style="Reset.TButton",
+        cursor="hand2"
+    )
+    reset_btn.pack(anchor='center', pady=(20,10))
+    
+    def get_total_publications(db_path=DB_PATH):
+        try:
+            conn = sqlite3.connect(db_path)
+            c = conn.cursor()
+            c.execute("SELECT COUNT(*) FROM metadatas")
+            count = c.fetchone()[0]
+            conn.close()
+            return count
+        except Exception as e:
+            update_status(f"[ERROR] Unable to count publications: {e}")
+            return 0
+
+    total_pubs = get_total_publications()
+
+    label_total_pubs = ttk.Label(
+        settings_frame,
+        text=f"Total publications in database: {total_pubs}",
+        style='TLabel'
+    )
+    label_total_pubs.pack(anchor='center', pady=(15,0))
 
 # -----------------------
 #       Interface
@@ -282,6 +793,24 @@ style_config = {
         'foreground': '#599258',
         'font': ('Segoe UI', 13, 'bold'),
         'relief': 'flat'
+    },'Reset.TButton': {
+        'background': '#A52A2A',      
+        'foreground': 'white',
+        'font': ('Segoe UI', 12, 'bold'),
+        'padding': 2
+    },
+    'Settings.TButton': {
+        'background': '#599258',      
+        'foreground': 'white',
+        'font': ('Segoe UI', 12, 'bold'),
+        'padding': 2
+    },
+    'TCheckbutton': {
+        'background': '#323232',
+        'foreground': 'white',
+        'font': ('Segoe UI', 13),
+        'focuscolor': '#323232',
+        'indicatorcolor': '#599258'
     }
 }
 
@@ -303,6 +832,14 @@ style.map('Bottom.TButton',
 style.map('TCheckbutton',
           background=[('active', '#323232'), ('pressed', '#323232')],
           foreground=[('active', 'white'), ('pressed', 'white')])
+
+style.map("Reset.TButton",
+          background=[('active', '#5C0000'), ('pressed', '#3E0000')],
+          foreground=[('disabled', '#d9d9d9')])
+
+style.map('Settings.TButton',
+          background=[('active', '#457a3a'), ('pressed', '#2e4a20')],
+          foreground=[('disabled', '#d9d9d9')])
 
 # === WIDGETS PRINCIPAUX ===
 
@@ -330,32 +867,29 @@ input.bind("<Return>", lambda event: (fetcher_ss(), "break"))
 input_button_frame = tk.Frame(input_frame, bg="#323232")
 input_button_frame.pack(side="right", fill=tk.Y)
 
-input_button_bottom_frame = tk.Frame(input_frame, bg="#323232")
-input_button_bottom_frame.pack(side="right", fill=tk.Y)
-
 btn_list = ttk.Button(
     input_button_frame,
-    text="Get last publications",
+    text="Search online",
     command=fetcher_ss,
     style='Green.TButton'
 )
 
 btn_graph = ttk.Button(
     input_button_frame,
-    text="Generate a semantic graph",
+    text="Generate a graph",
     command=on_sim_graph,
     style='Green.TButton'
 )
 
 btn_db = ttk.Button(
-    input_button_bottom_frame,
-    text="Get publications from the database",
-    command=fetcher_ss,
+    input_button_frame,
+    text="Get from the database",
+    command=get_from_base,
     style='Green.TButton'
 )
 
-btn_graph.pack(side="left", padx=(0, 5), pady=(0, 0), fill=tk.X, expand=True)
 btn_list.pack(side="left", padx=(0, 5), pady=(0, 0), fill=tk.X, expand=True)
+btn_graph.pack(side="left", padx=(0, 5), pady=(0, 0), fill=tk.X, expand=True)
 btn_db.pack(side="left", padx=(0, 5), pady=(0, 0), fill=tk.X, expand=True)
 
 # --- Placeholder / texte par défaut ---
@@ -412,12 +946,13 @@ else:
 question_context_menu = tk.Menu(input, tearoff=0)
 question_context_menu.add_command(label="Copy", command=lambda: input.event_generate("<<Copy>>"))
 question_context_menu.add_command(label="Paste", command=lambda: input.event_generate("<<Paste>>"))
-question_context_menu.add_command(label="Select all", command=lambda: input.tag_add("sel", "1.0", "end"))
 
 output_context_menu = tk.Menu(text_output, tearoff=0)
-output_context_menu.add_command(label="Copier", command=lambda: text_output.event_generate("<<Copy>>"))
-output_context_menu.add_command(label="Coller", command=lambda: text_output.event_generate("<<Paste>>"))
-output_context_menu.add_command(label="Tout sélectionner", command=lambda: text_output.tag_add("sel", "1.0", "end"))
+output_context_menu.add_command(label="Use as reference for a new search", command=fetcher_selected)
+output_context_menu.add_command(label="Use as reference for a new graph", command=generate_graph_with_selection)
+output_context_menu.add_command(label="Use as context for the assistant –WIP–", command=parser)
+output_context_menu.add_command(label="Download PDF from Open Access", command=download_selected_pdf)
+output_context_menu.add_command(label="Delete from database", command=delete_selected_publication)
 
 def show_question_context_menu(event):
     try:
@@ -444,19 +979,6 @@ output_frame.bind(right_click_event, show_output_context_menu)
 status_buttons_frame = ttk.Frame(main_frame, style='TFrame')
 status_buttons_frame.pack(fill=tk.X, pady=(5, 2))
 
-# Buttons frame below output, horizontal, fill width, fixed height
-buttons_frame = ttk.Frame(main_frame, style='TFrame')
-buttons_frame.pack(fill=tk.X, pady=(0, 10))
-
-btn_select_fetch = ttk.Button(buttons_frame, text="Use as reference", command=fetcher_ss, style='Bottom.TButton')
-btn_select_fetch.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-
-btn_Select_graph = ttk.Button(buttons_frame, text="Generate a graph", command=on_sim_graph, style='Bottom.TButton')
-btn_Select_graph.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-
-btn_select_rag = ttk.Button(buttons_frame, text="Use as context", command=parser, style='Bottom.TButton')
-btn_select_rag.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-
 # New frame for status label and Help button on same horizontal line
 status_help_frame = ttk.Frame(main_frame, style='TFrame')
 status_help_frame.pack(fill=tk.X, pady=(5, 2))
@@ -469,6 +991,9 @@ label_status = ttk.Label(
     anchor='w'
 )
 label_status.pack(side=tk.LEFT, fill=tk.X, expand=True, anchor='w')
+
+btn_settings = ttk.Button(status_help_frame, text="Settings", command=open_settings, style='Bottom.TButton', width=8)
+btn_settings.pack(side=tk.LEFT, padx=(0, 5))
 
 btn_help = ttk.Button(status_help_frame, text="Help", style='Bottom.TButton', command=show_help, width=8)
 btn_help.pack(side=tk.RIGHT, padx=(0, 0))

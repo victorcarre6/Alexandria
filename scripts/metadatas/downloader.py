@@ -3,7 +3,7 @@ import requests
 import sqlite3
 from requests.exceptions import HTTPError
 
-CACHE_DIR = "datas/pdfs"
+PDF_DIR = "datas/pdfs"
 
 def make_filename(title: str, journal: str, year: str) -> str:
     # Use "unknown_journal" if journal is missing or empty
@@ -12,6 +12,31 @@ def make_filename(title: str, journal: str, year: str) -> str:
     filename = f"{safe_title}({use_journal}{year}).pdf"
     return filename
 
+def download(record: dict) -> dict:
+    os.makedirs(PDF_DIR, exist_ok=True)
+    filename = make_filename(record.get("title", ""), record.get("journal", ""), record.get("year", ""))
+    local_path = os.path.join(PDF_DIR, filename)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/116.0.0.0 Safari/537.36"
+    }
+
+    pdf_link = record.get("pdf_link")
+    if pdf_link:
+        try:
+            resp = requests.get(pdf_link, headers=headers, timeout=30)
+            resp.raise_for_status()
+            with open(local_path, "wb") as f:
+                f.write(resp.content)
+            print(f"PDF downloaded from official link for '{record.get('title')}'")
+            record["local_path"] = local_path
+            record["file_name"] = os.path.splitext(filename)[0]
+            return record
+        except Exception as e:
+            print(f"Warning: Failed to download PDF for '{record.get('title')}' from {pdf_link}: {e}")
+    return record
+
 def sync_pdf_cache_scihub(doi: str) -> str:
     """
     Attempt to download a PDF from Sci-Hub given a DOI.
@@ -19,11 +44,11 @@ def sync_pdf_cache_scihub(doi: str) -> str:
     """
     if not doi:
         return None
-    os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs(PDF_DIR, exist_ok=True)
     # Use DOI as part of filename, sanitize it
     safe_doi = "".join(c for c in doi if c.isalnum() or c in ("_", "-", ".")).rstrip()
     filename = f"scihub_{safe_doi}.pdf"
-    local_path = os.path.join(CACHE_DIR, filename)
+    local_path = os.path.join(PDF_DIR, filename)
     if os.path.exists(local_path):
         return local_path
     # Sci-Hub URL (using a common mirror)
@@ -76,9 +101,9 @@ def find_oa_pdf(record: dict) -> str:
 def get_pdf_pipeline(record: dict) -> dict:
     if record.get("local_key", 0) != 1:
         return record
-    os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs(PDF_DIR, exist_ok=True)
     filename = make_filename(record.get("title", ""), record.get("journal", ""), record.get("year", ""))
-    local_path = os.path.join(CACHE_DIR, filename)
+    local_path = os.path.join(PDF_DIR, filename)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -123,7 +148,6 @@ def get_pdf_pipeline(record: dict) -> dict:
         record["file_name"] = os.path.splitext(os.path.basename(local_path_scihub))[0]
         return record
     return record
-
 
 # --- Traitement de la base pour téléchargement des PDFs ---
 def process_pdfs(db_path="datas/bibliography.db"):

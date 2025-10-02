@@ -206,4 +206,4 @@ datas/pdfs
 datas/old
 datas/bibliography.db
 RAG/
-keys.json
+resources/keys.json

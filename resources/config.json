@@ -1,0 +1,25 @@
+{
+  "fetch": {
+    "DEPTH": 3,
+    "FETCH_MAX_DOIS": 50,
+    "GRAPH_MAX_DOIS": 508,
+    "DATES": "500",
+    "SORT_BY": "500",
+    "PAUSE": 0.5,
+    "BATCH_SIZE": 100,
+    "MAX_WORKER": 10
+  },
+  "graph": {
+    "EDGE_MODE": "1",
+    "WEIGHT_THRESHOLD": 10,
+    "TOP_N": 43,
+    "TOP_N_CITES": 30,
+    "TOP_N_SCORE": 10,
+    "TOP_N_COCIT": 10,
+    "TOP_N_COUPLING": 10
+  },
+  "database": {
+    "DB_PATH": "scripts/memory_sync.py",
+    "EPHEMERAL": false
+  }
+}
